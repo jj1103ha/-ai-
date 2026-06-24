@@ -81,4 +81,8 @@ if q := st.chat_input("질문을 입력하세요"):
         with st.spinner("근거를 조회하는 중..."):
             try:
                 import agent
-                ans = agent.ask(q, verb
+                ans = agent.ask(q, verbose=False)
+            except Exception as e:
+                ans = f"오류: {e} (.env 또는 Secrets의 GROQ_API_KEY를 확인하세요)"
+            st.write(ans)
+    st.session_state.history.append(("assistant", ans))
