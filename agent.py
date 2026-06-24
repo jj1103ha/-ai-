@@ -6,7 +6,7 @@
 실행:  python agent.py            (대화형)
        python agent.py "경북에서 가장 시급한 5곳은?"   (단발 질문)
 """
-import os, json, sys, urllib.request
+import os, json, sys, re, urllib.request
 import decision_tools as T
 
 MODEL = "llama-3.3-70b-versatile"
@@ -35,7 +35,7 @@ SYSTEM = """너는 산림청 공무원의 '소나무재선충병 방제 정책�
 4) 너는 결정을 대신하지 않는다. '근거와 선택지'를 제시하고, 최종 판단·책임은 공무원에게 있음을 전제로 한다.
 5) 모델 한계(시군구×연도 표본 제한, 시도단위 일부 변수, 단가는 근사치)를 필요시 짚어라.
 6) 데이터 해상도를 구분하라: 예산(get_budget)·발생방제 추세(get_national_trend)는 '전국 단위', 산림면적·침엽수림·재선충 실적(get_region_context/predict_damage)은 '시군구 단위', 기후는 '시도/근접 관측소 근사'다. 시군구별 예산 실적은 데이터가 없으니, 예산 질문은 전국 실적(get_budget) 또는 예측피해 기반 배분(simulate_budget)으로 답하라.
-7) 답변은 한국어로, 간결하고 근거 중심으로."""
+7) 답변은 한국어로, 간결하고 근거 중심으로. 함수 호출 문법(<function=...>)을 답변 텍스트에 절대 쓰지 마라 — 도구는 정식 도구호출로만 사용하라."""
 
 TOOLS = [
     {"type": "function", "function": {
@@ -99,6 +99,22 @@ def _post(messages):
     return json.loads(urllib.request.urlopen(req, timeout=60).read())
 
 
+# Llama가 구조화 tool_calls 대신 텍스트로 함수호출을 뱉는 경우 파싱:
+#   <function=name>{json}</function>  또는  <function=name>{json}
+_FN_TEXT = re.compile(r"<function=(\w+)>\s*(\{.*?\})\s*(?:</function>)?", re.DOTALL)
+
+
+def _run(name, args, verbose):
+    if verbose:
+        print(f"  · 도구호출: {name}({args})")
+    try:
+        if name not in FUNCS:
+            return {"error": f"알 수 없는 도구: {name}"}
+        return FUNCS[name](**args)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def ask(question: str, verbose=True) -> str:
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": question}]
@@ -106,19 +122,31 @@ def ask(question: str, verbose=True) -> str:
         msg = _post(messages)["choices"][0]["message"]
         messages.append(msg)
         calls = msg.get("tool_calls")
-        if not calls:
-            return msg.get("content", "")
-        for c in calls:
-            name = c["function"]["name"]
-            args = json.loads(c["function"]["arguments"] or "{}")
-            if verbose:
-                print(f"  · 도구호출: {name}({args})")
-            try:
-                result = FUNCS[name](**args)
-            except Exception as e:
-                result = {"error": str(e)}
-            messages.append({"role": "tool", "tool_call_id": c["id"],
-                             "content": json.dumps(result, ensure_ascii=False)})
+        if calls:
+            for c in calls:
+                name = c["function"]["name"]
+                args = json.loads(c["function"]["arguments"] or "{}")
+                result = _run(name, args, verbose)
+                messages.append({"role": "tool", "tool_call_id": c["id"],
+                                 "content": json.dumps(result, ensure_ascii=False)})
+            continue
+        # 안전장치: 구조화 호출이 없으면 content 안의 텍스트형 함수호출을 파싱
+        content = msg.get("content", "") or ""
+        found = _FN_TEXT.findall(content)
+        if found:
+            results = []
+            for name, argstr in found:
+                try:
+                    args = json.loads(argstr)
+                except Exception:
+                    args = {}
+                results.append(f"{name}({args}) → " +
+                               json.dumps(_run(name, args, verbose), ensure_ascii=False))
+            messages.append({"role": "user", "content":
+                "다음은 도구 실행 결과다. 이것만 근거로 한국어로 자연스럽게 답하라. "
+                "함수 호출 문법(<function=...>)은 절대 출력하지 마라.\n" + "\n".join(results)})
+            continue
+        return content
     return "(도구 호출이 너무 많아 중단)"
 
 
