@@ -83,6 +83,10 @@ if q := st.chat_input("질문을 입력하세요"):
                 import agent
                 ans = agent.ask(q, history=st.session_state.history[:-1], verbose=False)
             except Exception as e:
-                ans = f"오류: {e} (.env 또는 Secrets의 GROQ_API_KEY를 확인하세요)"
+                m = str(e)
+                if "429" in m or "Too Many Requests" in m:
+                    ans = "⏳ 지금 요청이 몰려 잠시 한도에 걸렸어요. 10~20초 후 다시 시도해 주세요. (무료 등급 호출 한도)"
+                else:
+                    ans = f"⚠️ 일시적인 오류가 발생했어요. 잠시 후 다시 시도해 주세요.\n(상세: {e})"
             st.write(ans)
     st.session_state.history.append(("assistant", ans))
