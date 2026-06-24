@@ -4,14 +4,14 @@ ML 모델(차년도 감염목 예측)을 정책 도구로 노출한다.
 이 함수들이 그대로 (1) Groq 에이전트의 tool, (2) 향후 MCP 서버의 tool 이 된다.
 
 도구:
-  predict_damage(sgg_code)        : 특정 시군구의 차년도 감염목 예측
+  predict_damage(region)          : 특정 시군구의 차년도 감염목 예측 (이름/코드 모두 가능)
   get_priority_ranking(top_n,sido): 예측 피해 기준 방제 우선순위
   simulate_budget(...)            : 예산·가중치 시나리오별 배분
 모든 수치는 학습데이터/모델에서 산출하며, 데이터에 없으면 빈 결과를 반환한다(환각 방지).
 """
 import pandas as pd, numpy as np
 from sklearn.linear_model import Ridge
-from sgg_names import full_name
+from sgg_names import full_name, find_codes
 
 DATA = "재선충_ML학습데이터셋_2016_2023.csv"
 FEATS = ['surveyed_lag1','infected_lag1','dead_lag1','infect_rate_lag1','treat_rate_lag1',
@@ -65,19 +65,56 @@ def engine():
     return _E
 
 
+# ---------- 내부: 지역명/코드 → 단일 코드 해석 ----------
+def _resolve(region: str):
+    """지역명 또는 코드 → (sgg_code, 에러dict). 성공 시 (code, None), 실패 시 (None, dict)."""
+    cands = find_codes(region)
+    if not cands:
+        return None, {"found": False, "query": region,
+                      "msg": f"'{region}'에 해당하는 시군구를 찾지 못했습니다. 시도명을 함께 적어주세요(예: '울산 북구')."}
+    if len(cands) > 1:
+        return None, {"found": False, "ambiguous": True, "query": region,
+                      "candidates": [f"{c['sido']} {c['name']}" for c in cands],
+                      "msg": f"'{region}'는 여러 곳입니다. 시도명을 함께 지정하세요: " +
+                             ", ".join(f"{c['sido']} {c['name']}" for c in cands)}
+    return cands[0]["sgg_code"], None
+
+
 # ---------- 도구 1: 개별 시군구 예측 ----------
-def predict_damage(sgg_code: str) -> dict:
+def predict_damage(region: str = None, sgg_code: str = None) -> dict:
+    """차년도 감염목 예측. region에는 시군구 이름('울산 북구','밀양')이나 코드 모두 가능."""
+    q = region if region is not None else sgg_code
+    code, err = _resolve(q)
+    if err:
+        return err
     e = engine()
-    r = e.pred[e.pred['sgg_code'] == str(sgg_code)]
+    r = e.pred[e.pred['sgg_code'] == str(code)]
     if r.empty:
-        return {"found": False, "sgg_code": sgg_code, "msg": "데이터에 없는 시군구코드"}
+        return {"found": False, "sgg_code": code, "msg": "데이터에 없는 시군구코드"}
     r = r.iloc[0]
-    return {"found": True, "sgg_code": sgg_code, "sido": r['sido_nm'],
-            "name": full_name(sgg_code, r['sido_nm']),
+    pred = int(r['pred_infected'])
+    name = full_name(code, r['sido_nm'])
+    level, note = _severity(pred, name)
+    return {"found": True, "sgg_code": code, "sido": r['sido_nm'],
+            "name": name,
             "base_year": int(r['base_year']), "predict_year": int(r['base_year']) + 1,
             "recent_infected": int(r['recent_infected']),
-            "predicted_infected_next": int(r['pred_infected']),
+            "predicted_infected_next": pred,
+            "level": level, "note": note,
             "treat_rate": round(float(r['treat_rate']), 3)}
+
+
+def _severity(pred: int, name: str):
+    """예측 감염목 수를 피해 수준 등급+설명문으로 변환(에이전트가 풀어서 답하도록)."""
+    if pred <= 0:
+        return "피해 거의 없음", f"{name}: 차년도 예측 감염목이 0본으로, 피해가 거의 없는 지역입니다."
+    if pred <= 500:
+        return "경미", f"{name}: 차년도 예측 감염목이 약 {pred:,}본으로, 피해가 경미한 지역입니다."
+    if pred <= 3000:
+        return "보통", f"{name}: 차년도 예측 감염목이 약 {pred:,}본으로, 피해가 보통 수준인 지역입니다."
+    if pred <= 10000:
+        return "심각", f"{name}: 차년도 예측 감염목이 약 {pred:,}본으로, 피해가 심각한 지역입니다."
+    return "매우 심각", f"{name}: 차년도 예측 감염목이 약 {pred:,}본으로, 피해가 매우 심각한 지역입니다."
 
 
 # ---------- 도구 2: 우선순위 ----------
@@ -98,10 +135,22 @@ def get_priority_ranking(top_n: int = 10, sido: str = None) -> dict:
 
 # ---------- 도구 3: 예산 시나리오 ----------
 def simulate_budget(total_budget_won: float, unit_cost_won: float = 15000,
-                    top_n: int = 20, min_share: float = 0.0) -> dict:
-    """예측 피해에 비례해 예산 배분. unit_cost_won=감염목 1본 방제 단가(기본 1.5만원, 근사치)."""
+                    top_n: int = 20, min_share: float = 0.0, regions=None) -> dict:
+    """예측 피해에 비례해 예산 배분. unit_cost_won=감염목 1본 방제 단가(기본 1.5만원, 근사치).
+    regions: 특정 지역만 비교 배분할 때 이름/코드 리스트(예: ['경남 밀양','울산 북구']). 생략 시 전국 상위 top_n."""
     e = engine()
-    t = e.pred.head(int(top_n)).copy()
+    if regions:
+        codes, unresolved = [], []
+        for rg in regions:
+            code, err = _resolve(rg)
+            (unresolved if err else codes).append(err["msg"] if err else code)
+        if unresolved:
+            return {"msg": "일부 지역을 해석하지 못했습니다.", "errors": unresolved}
+        t = e.pred[e.pred['sgg_code'].isin(codes)].copy()
+        if t.empty:
+            return {"msg": "지정한 지역이 예측표에 없습니다."}
+    else:
+        t = e.pred.head(int(top_n)).copy()
     w = t['pred_infected'].clip(lower=0).astype(float)
     if w.sum() == 0:
         return {"msg": "예측 피해가 0이라 배분 불가"}

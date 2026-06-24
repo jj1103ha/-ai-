@@ -77,3 +77,74 @@ def full_name(sgg_code, sido_nm=""):
     if nm:
         return f"{sido_nm} {nm}".strip()
     return f"{sido_nm} {sgg_code}".strip()
+
+
+# 코드 앞 2자리 → 시도명 (지역명 검색 시 동음 시군구 구분에 사용)
+_PREFIX_SIDO = {
+    "11": "서울", "26": "부산", "27": "대구", "28": "인천", "29": "광주",
+    "30": "대전", "31": "울산", "36": "세종", "41": "경기", "42": "강원",
+    "43": "충북", "44": "충남", "45": "전북", "46": "전남", "47": "경북",
+    "48": "경남", "50": "제주", "51": "강원", "52": "전북",
+}
+# 시도 별칭(사용자가 입력할 법한 표기) → 정규 시도명
+_SIDO_ALIAS = {
+    "서울": "서울", "서울시": "서울", "서울특별시": "서울",
+    "부산": "부산", "부산시": "부산", "부산광역시": "부산",
+    "대구": "대구", "대구시": "대구", "대구광역시": "대구",
+    "인천": "인천", "인천시": "인천", "인천광역시": "인천",
+    "광주": "광주", "광주시": "광주", "광주광역시": "광주",
+    "대전": "대전", "대전시": "대전", "대전광역시": "대전",
+    "울산": "울산", "울산시": "울산", "울산광역시": "울산",
+    "세종": "세종", "세종시": "세종", "세종특별자치시": "세종",
+    "경기": "경기", "경기도": "경기",
+    "강원": "강원", "강원도": "강원", "강원특별자치도": "강원",
+    "충북": "충북", "충청북도": "충북",
+    "충남": "충남", "충청남도": "충남",
+    "전북": "전북", "전라북도": "전북", "전북특별자치도": "전북",
+    "전남": "전남", "전라남도": "전남",
+    "경북": "경북", "경상북도": "경북",
+    "경남": "경남", "경상남도": "경남",
+    "제주": "제주", "제주도": "제주", "제주특별자치도": "제주",
+}
+
+
+def _sido_of(code):
+    return _PREFIX_SIDO.get(str(code)[:2], "")
+
+
+def find_codes(query: str):
+    """지역명(또는 '시도 시군구')으로 법정동코드 후보를 찾는다.
+
+    반환: [{"sgg_code","name","sido"}] 리스트.
+      - 정확히 1개면 바로 사용, 여러 개면 모호 → 에이전트가 시도로 재질의.
+      - 코드 5자리를 그대로 넣어도 매칭됨.
+    예) "울산 북구" → 31200 / "밀양" → 48270 / "북구" → 5개 후보
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    # 코드 5자리를 직접 넣은 경우
+    digits = q.replace(" ", "")
+    if digits.isdigit() and digits in SGG_NAME:
+        return [{"sgg_code": digits, "name": SGG_NAME[digits], "sido": _sido_of(digits)}]
+
+    tokens = q.split()
+    want_sido = None
+    name_tokens = []
+    for t in tokens:
+        if t in _SIDO_ALIAS:
+            want_sido = _SIDO_ALIAS[t]
+        else:
+            name_tokens.append(t)
+    if not name_tokens:  # 시도만 입력 → 개별 시군구 특정 불가
+        return []
+
+    out = []
+    for code, nm in SGG_NAME.items():
+        sido = _sido_of(code)
+        if want_sido and sido != want_sido:
+            continue
+        # 시군구 이름 토큰이 모두 시군구명에 포함되어야 함 ('밀양'⊂'밀양시', '남구'⊂'포항시 남구')
+        if all(tok in nm for tok in name_tokens):
+            out.append({"sgg_code": code, "name": nm, "sido": sido})
+    return out

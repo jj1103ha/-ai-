@@ -29,18 +29,20 @@ KEY = _load_key()
 SYSTEM = """너는 산림청 공무원의 '소나무재선충병 방제 정책결정'을 돕는 지원 에이전트다.
 원칙:
 1) 모든 수치는 반드시 제공된 도구(predict_damage/get_priority_ranking/simulate_budget)를 호출해 얻어라. 절대 숫자를 추측하지 마라.
-2) 도구 결과에 없는 값은 "데이터에 없음"이라고 솔직히 말하라.
-3) 너는 결정을 대신하지 않는다. '근거와 선택지'를 제시하고, 최종 판단·책임은 공무원에게 있음을 전제로 한다.
-4) 모델 한계(시군구×연도 표본 제한, 시도단위 일부 변수, 단가는 근사치)를 필요시 짚어라.
-5) 답변은 한국어로, 간결하고 근거 중심으로."""
+2) 시군구를 조회할 때는 '이름'을 그대로 넘겨라(예: predict_damage(region="울산 북구")). 법정동코드를 절대 네 기억으로 추측하지 마라 — 도구가 이름을 코드로 변환한다.
+3) 도구가 'ambiguous'(여러 후보)를 반환하면, 후보 목록을 사용자에게 보여주고 시도명을 함께 물어 다시 조회하라. 'found:false'면 그 이유(미매칭/모호)를 그대로 전하고, 함부로 "데이터에 없음"으로 단정하지 마라.
+3-1) predict_damage가 found:true면 예측 감염목 수(predicted_infected_next)와 함께 level/note를 활용해 피해 수준을 '풀어서' 설명하라. 특히 예측이 0이거나 작을 때 숫자만 던지지 말고 "피해가 거의 없는/경미한 지역입니다"처럼 의미를 전하라.
+4) 너는 결정을 대신하지 않는다. '근거와 선택지'를 제시하고, 최종 판단·책임은 공무원에게 있음을 전제로 한다.
+5) 모델 한계(시군구×연도 표본 제한, 시도단위 일부 변수, 단가는 근사치)를 필요시 짚어라.
+6) 답변은 한국어로, 간결하고 근거 중심으로."""
 
 TOOLS = [
     {"type": "function", "function": {
         "name": "predict_damage",
-        "description": "특정 시군구(법정동코드 앞 5자리)의 차년도 감염목 수를 예측",
+        "description": "특정 시군구의 차년도 감염목 수를 예측. 시군구 '이름'을 넘기면 내부에서 코드로 변환한다. 코드를 추측하지 말 것.",
         "parameters": {"type": "object", "properties": {
-            "sgg_code": {"type": "string", "description": "시군구 코드 5자리 예:47830"}},
-            "required": ["sgg_code"]}}},
+            "region": {"type": "string", "description": "시군구 이름 또는 '시도 시군구'. 예:'울산 북구','경남 밀양','당진','제주시'"}},
+            "required": ["region"]}}},
     {"type": "function", "function": {
         "name": "get_priority_ranking",
         "description": "예측 피해 기준 방제 우선순위 시군구 목록. sido로 특정 시도만 필터 가능",
@@ -54,8 +56,10 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "total_budget_won": {"type": "number", "description": "총 예산(원)"},
             "unit_cost_won": {"type": "number", "description": "감염목 1본 방제단가(원), 기본 15000"},
-            "top_n": {"type": "integer", "description": "배분 대상 상위 시군구 수"},
-            "min_share": {"type": "number", "description": "0~1, 각 지역 최소 배분비율"}},
+            "top_n": {"type": "integer", "description": "배분 대상 상위 시군구 수(전국 기준)"},
+            "min_share": {"type": "number", "description": "0~1, 각 지역 최소 배분비율"},
+            "regions": {"type": "array", "items": {"type": "string"},
+                        "description": "특정 지역만 비교 배분할 때 이름/코드 리스트. 예:['경남 밀양','울산 북구']"}},
             "required": ["total_budget_won"]}}},
 ]
 FUNCS = {"predict_damage": T.predict_damage,
