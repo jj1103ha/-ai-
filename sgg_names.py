@@ -128,12 +128,16 @@ def find_codes(query: str):
     if digits.isdigit() and digits in SGG_NAME:
         return [{"sgg_code": digits, "name": SGG_NAME[digits], "sido": _sido_of(digits)}]
 
+    _SIDO_SHORT = set(_PREFIX_SIDO.values())  # {'서울','부산',...}
     tokens = q.split()
     want_sido = None
     name_tokens = []
     for t in tokens:
         if t in _SIDO_ALIAS:
             want_sido = _SIDO_ALIAS[t]
+        elif len(t) > 2 and t[:2] in _SIDO_SHORT:  # '대전동구' → 시도 '대전' + '동구'
+            want_sido = t[:2]
+            name_tokens.append(t[2:])
         else:
             name_tokens.append(t)
     if not name_tokens:  # 시도만 입력 → 개별 시군구 특정 불가

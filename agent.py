@@ -6,7 +6,7 @@
 실행:  python agent.py            (대화형)
        python agent.py "경북에서 가장 시급한 5곳은?"   (단발 질문)
 """
-import os, json, sys, re, urllib.request
+import os, json, sys, re, time, urllib.request, urllib.error
 import decision_tools as T
 
 MODEL = "llama-3.3-70b-versatile"
@@ -90,13 +90,21 @@ FUNCS = {"predict_damage": T.predict_damage,
          "get_region_context": T.get_region_context}
 
 
-def _post(messages):
+def _post(messages, _retries=3):
     body = json.dumps({"model": MODEL, "messages": messages, "tools": TOOLS,
                        "temperature": 0.2}).encode()
     req = urllib.request.Request(API, data=body,
         headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json",
                  "User-Agent": "Mozilla/5.0"})
-    return json.loads(urllib.request.urlopen(req, timeout=60).read())
+    for attempt in range(_retries + 1):
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=60).read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < _retries:  # 무료등급 호출한도 → 대기 후 재시도
+                wait = int(e.headers.get("retry-after", 0)) or (2 ** attempt * 3)
+                time.sleep(min(wait, 20))
+                continue
+            raise
 
 
 # Llama가 구조화 tool_calls 대신 텍스트로 함수호출을 뱉는 경우 파싱:
