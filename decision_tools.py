@@ -4,16 +4,22 @@ ML 모델(차년도 감염목 예측)을 정책 도구로 노출한다.
 이 함수들이 그대로 (1) Groq 에이전트의 tool, (2) 향후 MCP 서버의 tool 이 된다.
 
 도구:
-  predict_damage(region)          : 특정 시군구의 차년도 감염목 예측 (이름/코드 모두 가능)
+  predict_damage(region)          : 특정 시군구의 차년도 감염목 예측 (이름/코드)
   get_priority_ranking(top_n,sido): 예측 피해 기준 방제 우선순위
   simulate_budget(...)            : 예산·가중치 시나리오별 배분
-모든 수치는 학습데이터/모델에서 산출하며, 데이터에 없으면 빈 결과를 반환한다(환각 방지).
+  get_budget(year,kind)           : 전국 예산 집행/계획
+  get_national_trend(year)        : 전국 발생·방제 면적 추이
+  get_region_context(region)      : 시군구 산림·기후·재선충 종합
+모든 수치는 학습데이터/모델/정제 데이터에서 산출하며, 없으면 빈 결과를 반환한다(환각 방지).
 """
 import pandas as pd, numpy as np
 from sklearn.linear_model import Ridge
 from sgg_names import full_name, find_codes
 
-DATA = "재선충_ML학습데이터셋_2016_2023.csv"
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+def _p(*a): return os.path.join(_HERE, *a)
+DATA = _p("재선충_ML학습데이터셋_2016_2023.csv")
 FEATS = ['surveyed_lag1','infected_lag1','dead_lag1','infect_rate_lag1','treat_rate_lag1',
          'surveyed_lag2','infected_lag2','dead_lag2','infected_growth']
 
@@ -168,6 +174,97 @@ def simulate_budget(total_budget_won: float, unit_cost_won: float = 15000,
             for (_, r), a, tr in zip(t.iterrows(), alloc, treatable)]
     return {"total_budget_won": int(total_budget_won), "unit_cost_won": int(unit_cost_won),
             "min_share": min_share, "allocations": rows}
+
+
+# ---------- 보조 데이터 로더 (data/ 정제본, 1회 캐시) ----------
+_CACHE = {}
+def _csv(fname):
+    if fname not in _CACHE:
+        _CACHE[fname] = pd.read_csv(_p("data", fname), encoding="utf-8-sig", dtype={"sgg_code": str})
+    return _CACHE[fname]
+
+
+# ---------- 도구 4: 예산 (집행 실적 / 중장기 계획) ----------
+def get_budget(year: int = None, kind: str = "집행") -> dict:
+    """전국 산림병해충방제 예산. kind='집행'(2019~2024 단위사업 결산·집행률, 백만원),
+    kind='계획'(2021~2030 예찰·방제계획 전략별 소요예산, 억원)."""
+    try:
+        if kind == "계획":
+            d = _csv("예산_계획_2021_2030.csv")
+            cols = [c for c in d.columns if c.isdigit()]
+            if year:
+                y = str(year)
+                if y not in cols:
+                    return {"found": False, "msg": f"{year}년 계획 데이터 없음(범위 2021~2030)"}
+                items = [{"전략": r["전략"], "소요예산_억원": r[y]} for _, r in d.iterrows()]
+                return {"found": True, "kind": "계획", "year": year, "unit": "억원", "items": items}
+            return {"found": True, "kind": "계획", "unit": "억원", "years": cols,
+                    "items": d.to_dict("records")}
+        else:
+            d = _csv("예산_집행_2019_2024.csv")
+            if year:
+                r = d[d["연도"] == int(year)]
+                if r.empty:
+                    return {"found": False, "msg": f"{year}년 집행 데이터 없음(범위 2019~2024)"}
+                r = r.iloc[0]
+                return {"found": True, "kind": "집행", "year": int(year), "unit": "백만원",
+                        "예산현액": int(r["예산현액_백만원"]), "결산": int(r["결산_백만원"]),
+                        "집행률_pct": float(r["집행률_pct"])}
+            return {"found": True, "kind": "집행", "unit": "백만원", "items": d.to_dict("records")}
+    except Exception as e:
+        return {"found": False, "msg": f"예산 데이터 로드 오류: {e}"}
+
+
+# ---------- 도구 5: 전국 발생/방제 면적 추이 ----------
+def get_national_trend(year: int = None) -> dict:
+    """전국 산림병해충 발생·방제 면적 추이(2014~2024, ha, 전체 해충 '계' 기준)."""
+    try:
+        d = _csv("전국_발생방제_2014_2024.csv")
+        if year:
+            r = d[d["연도"] == int(year)]
+            if r.empty:
+                return {"found": False, "msg": f"{year}년 데이터 없음(범위 2014~2024)"}
+            r = r.iloc[0]
+            return {"found": True, "year": int(year), "unit": "ha",
+                    "발생면적": int(r["발생면적_ha"]), "방제면적": int(r["방제면적_ha"])}
+        return {"found": True, "unit": "ha", "basis": "전체 산림병해충 '계'(방제는 천ha→ha 환산)",
+                "items": d.to_dict("records")}
+    except Exception as e:
+        return {"found": False, "msg": f"추세 데이터 로드 오류: {e}"}
+
+
+# ---------- 도구 6: 시군구 종합 컨텍스트 (산림·기후·재선충) ----------
+def get_region_context(region: str) -> dict:
+    """특정 시군구의 산림면적·침엽수림 면적·임목축적·기후(시도/근접 관측소 근사) +
+    최신 재선충 감염·방제 실적 + 차년도 예측을 한 번에 반환."""
+    code, err = _resolve(region)
+    if err:
+        return err
+    out = {"found": True, "sgg_code": code}
+    try:
+        c = _csv("시군구_산림_기후.csv")
+        row = c[c["sgg_code"] == str(code)]
+        if not row.empty:
+            r = row.iloc[0]
+            def g(k):
+                v = r[k]
+                return None if pd.isna(v) else (int(v) if float(v).is_integer() else float(v))
+            out.update({
+                "name": f"{r['sido']} {r['name']}", "sido": r["sido"],
+                "산림면적_ha": g("forest_area_ha"), "침엽수림면적_ha": g("conifer_area_ha"),
+                "임목축적_m3": g("growing_stock_m3"),
+                "기후_관측소": r["climate_station"], "여름평균기온": g("summer_temp"),
+                "폭염일수": g("heat_days"), "연강수량_mm": g("annual_precip"),
+                "기후_주의": "기후는 시군구명 일치 또는 시도 대표 관측소 기준 근사치",
+            })
+    except Exception as e:
+        out["산림기후_오류"] = str(e)
+    # 최신 재선충 실적 + 예측
+    pred = predict_damage(sgg_code=code)
+    if pred.get("found"):
+        out.update({"최근_감염목": pred["recent_infected"], "방제율": pred["treat_rate"],
+                    "차년도_예측감염목": pred["predicted_infected_next"], "피해수준": pred["level"]})
+    return out
 
 
 if __name__ == "__main__":
