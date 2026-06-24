@@ -123,9 +123,15 @@ def _run(name, args, verbose):
         return {"error": str(e)}
 
 
-def ask(question: str, verbose=True) -> str:
-    messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": question}]
+def ask(question: str, history=None, verbose=True) -> str:
+    """history: [(role, content)] 직전 대화. '왜?' 같은 이어지는 질문 맥락 유지용.
+    무료등급 토큰 한도를 고려해 최근 8개 메시지만 사용."""
+    messages = [{"role": "system", "content": SYSTEM}]
+    if history:
+        for role, content in history[-8:]:
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
     for _ in range(6):  # 최대 6회 도구 호출 루프
         msg = _post(messages)["choices"][0]["message"]
         messages.append(msg)
