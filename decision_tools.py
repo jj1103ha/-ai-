@@ -175,11 +175,12 @@ def simulate_budget(total_budget_won: float, unit_cost_won: float = 15000,
     rows = [{"name": full_name(r['sgg_code'], r['sido_nm']),
              "sgg_code": r['sgg_code'], "sido": r['sido_nm'],
              "predicted_infected_next": int(r['pred_infected']),
-             "budget_won": int(a), "treatable_trees": int(tr),
+             "budget_won": int(a), "budget_억원": round(int(a) / 1e8, 1),
+             "treatable_trees": int(tr),
              "coverage": round(min(1.0, tr / r['pred_infected']), 3) if r['pred_infected'] > 0 else None}
             for (_, r), a, tr in zip(t.iterrows(), alloc, treatable)]
-    return {"total_budget_won": int(total_budget_won), "unit_cost_won": int(unit_cost_won),
-            "min_share": min_share, "allocations": rows}
+    return {"total_budget_won": int(total_budget_won), "total_budget_억원": round(int(total_budget_won) / 1e8, 1),
+            "unit_cost_won": int(unit_cost_won), "min_share": min_share, "allocations": rows}
 
 
 # ---------- 보조 데이터 로더 (data/ 정제본, 1회 캐시) ----------
