@@ -9,7 +9,8 @@
 import os, json, sys, re, time, urllib.request, urllib.error
 import decision_tools as T
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "llama-3.3-70b-versatile"          # 기본(정확도 우선)
+FALLBACK_MODEL = "llama-3.1-8b-instant"    # 70B 한도 초과 시 폴백(한도 넉넉)
 API = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -37,6 +38,7 @@ SYSTEM = """너는 산림청 공무원의 '소나무재선충병 방제 정책�
 6) 데이터 해상도를 구분하라: 예산(get_budget)·발생방제 추세(get_national_trend)는 '전국 단위', 산림면적·침엽수림·재선충 실적(get_region_context/predict_damage)은 '시군구 단위', 기후는 '시도/근접 관측소 근사'다.
 6-0) 특정 시군구(예: 진주)의 '과거/작년 집행 예산'을 물으면, 시군구별 예산 데이터는 없다고 분명히 말하라. get_budget의 전국 수치를 줄 때는 반드시 "전국 기준"이라고 명시하고, 그 지역의 예산이 아님을 밝혀라(전국값을 그 지역 값처럼 답하지 마라). 특정 시군구에 '얼마가 필요한가'를 물으면 predict_damage(region)의 '직접방제비_억원'을 그대로 인용하고, 이는 감염목 직접 제거비이며 전체 사업예산과 다름을 밝혀라(숫자를 임의로 만들지 마라).
 6-1) "○○(시도)에 N억 배분/자치구 배분" 같은 질문은 개별 시군구를 일일이 조회하지 말고 simulate_budget(total_budget_won, sido="○○") '한 번'으로 처리하라. 도구 호출은 최소로 하라. 금액을 말할 때는 도구가 준 'budget_억원'·'total_budget_억원' 필드를 그대로 써라(원→억 변환을 직접 하지 마라, 0 개수 실수 방지). 예측 감염목이 0인 지역은 배분에서 빠지는 게 정상이며, 전액이 피해가 있는 지역에 집중될 수 있다.
+6-1-2) 직전 배분/우선순위에 대해 "근거·이유·왜"를 물으면, 같은 배분 금액을 반복하지 말고 '차년도 예측 감염목 수(predicted_infected_next)에 비례해 배분했다'는 점을 밝히고 각 지역의 예측 감염목 수치를 제시하라. 필요하면 도구 결과의 predicted_infected_next를 근거로 다시 인용하라.
 6-2) "전년 대비 예산을 얼마나 투입/증액/감액해야 하나" 같은 '필요예산 추정' 질문은 estimate_required_budget를 호출하라. 과거 수치만 나열하지 말고, 예측 피해 증감률(피해_증감률_pct)을 근거로 "전년 대비 약 ±X% 조정 검토"처럼 방향과 참고치를 제시하라. 직접제거비는 전체 예산의 일부일 뿐임을 밝혀라.
 7) 도구 결과의 각 값을 그 라벨 그대로 정확히 사용하라. 특히 '발생면적'과 '방제면적', '예산현액'과 '결산'을 절대 뒤바꾸지 마라. 비교·증감을 말할 때는 같은 항목끼리(발생↔발생, 방제↔방제)만 비교하라.
 8) 답변은 반드시 자연스러운 한국어로만 작성하라. 한자(漢字)나 다른 언어 문자를 절대 섞지 마라(예: '적습니다'를 '少습니다'로 쓰지 마라). 간결하고 근거 중심으로. 함수 호출 문법(<function=...>)을 답변 텍스트에 절대 출력하지 마라."""
@@ -102,20 +104,29 @@ FUNCS = {"predict_damage": T.predict_damage,
          "estimate_required_budget": T.estimate_required_budget}
 
 
-def _post(messages, _retries=2):
-    body = json.dumps({"model": MODEL, "messages": messages, "tools": TOOLS,
+_USED_FALLBACK = {"v": False}  # 이번 ask()에서 폴백(8B) 사용 여부
+
+
+def _post(messages, model=None, _retries=2):
+    model = model or MODEL
+    body = json.dumps({"model": model, "messages": messages, "tools": TOOLS,
                        "temperature": 0.2}).encode()
     req = urllib.request.Request(API, data=body,
         headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json",
                  "User-Agent": "Mozilla/5.0"})
     for attempt in range(_retries + 1):
         try:
-            return json.loads(urllib.request.urlopen(req, timeout=60).read())
+            resp = json.loads(urllib.request.urlopen(req, timeout=60).read())
+            if model == FALLBACK_MODEL:
+                _USED_FALLBACK["v"] = True
+            return resp
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < _retries:  # 무료등급 호출한도 → 짧게 대기 후 재시도
                 wait = int(e.headers.get("retry-after", 0)) or (3 * (attempt + 1))
                 time.sleep(min(wait, 6))
                 continue
+            if e.code == 429 and model == MODEL:  # 70B 한도 → 가벼운 모델로 1회 폴백
+                return _post(messages, model=FALLBACK_MODEL, _retries=1)
             raise
 
 
@@ -186,12 +197,18 @@ def _converse(question, history, verbose):
 def ask(question: str, history=None, verbose=True) -> str:
     """history: [(role, content)] 직전 대화. '왜?' 같은 이어지는 질문 맥락 유지용.
     무료등급 토큰 한도를 고려해 최근 8개만 사용. 400이면 기록 없이 1회 재시도."""
+    _USED_FALLBACK["v"] = False
     try:
-        return _converse(question, history, verbose)
+        ans = _converse(question, history, verbose)
     except urllib.error.HTTPError as e:
         if e.code == 400 and history:  # 대화기록이 원인일 수 있으니 기록 없이 재시도
-            return _converse(question, None, verbose)
-        raise
+            ans = _converse(question, None, verbose)
+        else:
+            raise
+    if _USED_FALLBACK["v"]:
+        ans = ("ℹ️ 요청량이 많아 보조 모델(경량)로 답변했어요. 평소보다 정확도가 낮을 수 있어요.\n\n"
+               + (ans or ""))
+    return ans
 
 
 if __name__ == "__main__":
