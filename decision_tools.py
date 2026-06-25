@@ -101,12 +101,15 @@ def predict_damage(region: str = None, sgg_code: str = None) -> dict:
     pred = int(r['pred_infected'])
     name = full_name(code, r['sido_nm'])
     level, note = _severity(pred, name)
+    direct = pred * 15000  # 직접 방제(제거)비 = 예측 감염목 × 단가(1.5만원)
     return {"found": True, "sgg_code": code, "sido": r['sido_nm'],
             "name": name,
             "base_year": int(r['base_year']), "predict_year": int(r['base_year']) + 1,
             "recent_infected": int(r['recent_infected']),
             "predicted_infected_next": pred,
             "level": level, "note": note,
+            "직접방제비_원": direct, "직접방제비_억원": round(direct / 1e8, 2),
+            "직접방제비_주의": "감염목 제거비만 반영(예찰·예방·인건비 제외). 시군구별 실제 집행예산 데이터는 없음.",
             "treat_rate": round(float(r['treat_rate']), 3)}
 
 
