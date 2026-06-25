@@ -101,12 +101,15 @@ def predict_damage(region: str = None, sgg_code: str = None) -> dict:
     pred = int(r['pred_infected'])
     name = full_name(code, r['sido_nm'])
     level, note = _severity(pred, name)
+    direct = pred * 15000  # 직접 방제(제거)비 = 예측 감염목 × 단가(1.5만원)
     return {"found": True, "sgg_code": code, "sido": r['sido_nm'],
             "name": name,
             "base_year": int(r['base_year']), "predict_year": int(r['base_year']) + 1,
             "recent_infected": int(r['recent_infected']),
             "predicted_infected_next": pred,
             "level": level, "note": note,
+            "직접방제비_원": direct, "직접방제비_억원": round(direct / 1e8, 2),
+            "직접방제비_주의": "감염목 제거비만 반영(예찰·예방·인건비 제외). 시군구별 실제 집행예산 데이터는 없음.",
             "treat_rate": round(float(r['treat_rate']), 3)}
 
 
@@ -175,11 +178,12 @@ def simulate_budget(total_budget_won: float, unit_cost_won: float = 15000,
     rows = [{"name": full_name(r['sgg_code'], r['sido_nm']),
              "sgg_code": r['sgg_code'], "sido": r['sido_nm'],
              "predicted_infected_next": int(r['pred_infected']),
-             "budget_won": int(a), "treatable_trees": int(tr),
+             "budget_won": int(a), "budget_억원": round(int(a) / 1e8, 1),
+             "treatable_trees": int(tr),
              "coverage": round(min(1.0, tr / r['pred_infected']), 3) if r['pred_infected'] > 0 else None}
             for (_, r), a, tr in zip(t.iterrows(), alloc, treatable)]
-    return {"total_budget_won": int(total_budget_won), "unit_cost_won": int(unit_cost_won),
-            "min_share": min_share, "allocations": rows}
+    return {"total_budget_won": int(total_budget_won), "total_budget_억원": round(int(total_budget_won) / 1e8, 1),
+            "unit_cost_won": int(unit_cost_won), "min_share": min_share, "allocations": rows}
 
 
 # ---------- 보조 데이터 로더 (data/ 정제본, 1회 캐시) ----------
@@ -237,6 +241,45 @@ def get_national_trend(year: int = None) -> dict:
                 "items": d.to_dict("records")}
     except Exception as e:
         return {"found": False, "msg": f"추세 데이터 로드 오류: {e}"}
+
+
+# ---------- 도구 7: 차년도 필요 예산 추정 (전년 대비) ----------
+def estimate_required_budget(unit_cost_won: float = 15000, sido: str = None) -> dict:
+    """차년도 예측 피해를 근거로 '전년 대비 예산을 얼마나 투입해야 하는지'를 추정한다.
+    핵심 논리: 예측 감염목이 전년 대비 ±X% 변하면 방제 예산도 그에 준해 조정 검토.
+    단정이 아니라 근거(증감률)+참고치를 제시한다(최종 판단은 공무원)."""
+    e = engine()
+    t = e.pred if not sido else e.pred[e.pred['sido_nm'] == sido]
+    if sido and t.empty:
+        return {"found": False, "msg": f"'{sido}' 시도 데이터가 없습니다."}
+    tot_pred = int(t['pred_infected'].sum())
+    tot_recent = int(t['recent_infected'].sum())
+    chg = (tot_pred - tot_recent) / tot_recent if tot_recent else None
+    out = {"found": True, "scope": sido or "전국",
+           "predict_year": int(e.pred['base_year'].iloc[0]) + 1,
+           "예측_감염목_합계": tot_pred, "전년_감염목_합계": tot_recent,
+           "피해_증감률_pct": round(chg * 100, 1) if chg is not None else None,
+           "직접제거비_원": int(tot_pred * unit_cost_won),
+           "직접제거비_주의": "감염목 제거비만 반영. 예찰·예방·인건비 등 전체 사업예산의 일부임."}
+    try:
+        b = _csv("예산_집행_2019_2024.csv").sort_values("연도")
+        last = b.iloc[-1]
+        prev_year, prev_mw = int(last["연도"]), int(last["결산_백만원"])
+        out["전년도"] = prev_year
+        out["전년_집행예산_백만원"] = prev_mw
+        if sido:  # 예산은 전국 단위만 존재 → 시도 증감률을 전국예산에 곱하지 않음
+            out["예산_단위_주의"] = "예산은 전국 단위만 존재(시도별 예산 데이터 없음). 전년 예산은 전국 기준."
+            if chg is not None:
+                out["해석"] = (f"{sido}의 내년 예측 피해가 전년 대비 {chg*100:+.1f}%다. "
+                              f"시도별 예산 데이터가 없어 금액 환산은 어렵고, 증감률을 조정 방향의 근거로 활용하라.")
+        elif chg is not None:
+            out["피해비례_참고예산_백만원"] = round(prev_mw * (1 + chg))
+            out["해석"] = (f"내년 예측 피해가 전년 대비 {chg*100:+.1f}%이므로, "
+                          f"전년 집행예산({prev_mw:,}백만원)을 피해에 비례시키면 "
+                          f"약 {round(prev_mw*(1+chg)):,}백만원 수준. 정책적 조정폭은 공무원이 판단.")
+    except Exception as ex:
+        out["예산비교_오류"] = str(ex)
+    return out
 
 
 # ---------- 도구 6: 시군구 종합 컨텍스트 (산림·기후·재선충) ----------
