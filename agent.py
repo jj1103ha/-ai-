@@ -134,18 +134,25 @@ def _run(name, args, verbose):
         return {"error": str(e)}
 
 
-def ask(question: str, history=None, verbose=True) -> str:
-    """history: [(role, content)] 직전 대화. '왜?' 같은 이어지는 질문 맥락 유지용.
-    무료등급 토큰 한도를 고려해 최근 8개 메시지만 사용."""
+def _slim(msg):
+    """모델 응답 메시지를 재전송용으로 정리(role/content/tool_calls만 유지)."""
+    out = {"role": msg.get("role", "assistant")}
+    out["content"] = msg.get("content") or ""
+    if msg.get("tool_calls"):
+        out["tool_calls"] = msg["tool_calls"]
+    return out
+
+
+def _converse(question, history, verbose):
     messages = [{"role": "system", "content": SYSTEM}]
     if history:
         for role, content in history[-8:]:
-            if role in ("user", "assistant") and content:
+            if role in ("user", "assistant") and content and isinstance(content, str):
                 messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": question})
     for _ in range(6):  # 최대 6회 도구 호출 루프
         msg = _post(messages)["choices"][0]["message"]
-        messages.append(msg)
+        messages.append(_slim(msg))
         calls = msg.get("tool_calls")
         if calls:
             for c in calls:
@@ -173,6 +180,17 @@ def ask(question: str, history=None, verbose=True) -> str:
             continue
         return content
     return "(도구 호출이 너무 많아 중단)"
+
+
+def ask(question: str, history=None, verbose=True) -> str:
+    """history: [(role, content)] 직전 대화. '왜?' 같은 이어지는 질문 맥락 유지용.
+    무료등급 토큰 한도를 고려해 최근 8개만 사용. 400이면 기록 없이 1회 재시도."""
+    try:
+        return _converse(question, history, verbose)
+    except urllib.error.HTTPError as e:
+        if e.code == 400 and history:  # 대화기록이 원인일 수 있으니 기록 없이 재시도
+            return _converse(question, None, verbose)
+        raise
 
 
 if __name__ == "__main__":
