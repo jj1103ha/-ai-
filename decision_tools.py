@@ -127,19 +127,33 @@ def _severity(pred: int, name: str):
 
 
 # ---------- 도구 2: 우선순위 ----------
-def get_priority_ranking(top_n: int = 10, sido: str = None) -> dict:
+def get_priority_ranking(top_n: int = 10, sido: str = None,
+                         by: str = "level", unit_cost_won: float = 15000) -> dict:
+    """방제 우선순위. by='level'(차년도 예측 감염목 절대량, 기본) 또는
+    by='growth'(전년 대비 증가량=증가 추이). unit_cost_won로 지역별 직접방제비도 계산."""
     e = engine()
     t = e.pred.copy()
     if sido:
         t = t[t['sido_nm'] == sido]
+    t = t.assign(__growth=t['pred_infected'] - t['recent_infected'])
+    if by == "growth":
+        t = t.sort_values('__growth', ascending=False)
+        basis = "차년도 예측 감염목의 전년 대비 증가량(증가 추이) 기준"
+    else:
+        t = t.sort_values('pred_infected', ascending=False)
+        basis = "차년도 예측 감염목 수(절대량) 기준"
     t = t.head(int(top_n))
     rows = [{"rank": i + 1, "name": full_name(r['sgg_code'], r['sido_nm']),
              "sgg_code": r['sgg_code'], "sido": r['sido_nm'],
              "predicted_infected_next": int(r['pred_infected']),
              "recent_infected": int(r['recent_infected']),
+             "증감_감염목": int(r['__growth']),
+             "직접방제비_원": int(r['pred_infected'] * unit_cost_won),
+             "직접방제비_억원": round(int(r['pred_infected'] * unit_cost_won) / 1e8, 2),
              "treat_rate": round(float(r['treat_rate']), 3)}
             for i, (_, r) in enumerate(t.iterrows())]
-    return {"basis": "차년도 예측 감염목 수 기준", "filter_sido": sido or "전국", "items": rows}
+    return {"basis": basis, "unit_cost_won": int(unit_cost_won),
+            "filter_sido": sido or "전국", "items": rows}
 
 
 # ---------- 도구 3: 예산 시나리오 ----------
